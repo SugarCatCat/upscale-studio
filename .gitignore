@@ -1,0 +1,5 @@
+.venv/
+models/
+workspace/
+__pycache__/
+*.pyc

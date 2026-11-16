@@ -36,6 +36,7 @@ run.bat           :: Windows
 python -m upscaler.cli doctor                       # 只检查/下载模型
 python -m upscaler.cli image -i ~/Pics/in -o ~/out --scale 2
 python -m upscaler.cli video -i a.mp4 -o ~/out --mult 2 --scale 2
+python -m upscaler.cli video -i ~/Videos/in -o ~/out --mult 2 --scale 2   # 目录：逐个处理
 python -m upscaler.cli video -i a.mp4 -o ~/out --mult 1 --scale 2      # 只超分
 ```
 

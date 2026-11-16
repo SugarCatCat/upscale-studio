@@ -38,6 +38,11 @@ def _run_json(args: list[str]) -> dict:
 
 
 def probe(path: str) -> dict:
+    p = Path(path)
+    if not p.exists():
+        raise RuntimeError(f"文件不存在：{path}")
+    if not p.is_file():
+        raise RuntimeError(f"这不是一个视频文件：{path}（目录里的视频会逐个处理，不应直接探测目录）")
     d = _run_json(["ffprobe", "-v", "error", "-print_format", "json",
                    "-show_format", "-show_streams", path])
     v = next(s for s in d["streams"] if s["codec_type"] == "video")

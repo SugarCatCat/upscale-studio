@@ -6,7 +6,7 @@ import os
 import sys
 
 from . import registry
-from .pipeline import run_images, run_video
+from .pipeline import run_images, run_videos
 
 
 def _printer():
@@ -58,7 +58,7 @@ def main(argv=None):
         r = run_images(a.input, a.output, scale=a.scale, model=a.model,
                        method=a.method, device=a.device, emit=emit)
     else:
-        r = run_video(a.input, a.output, scale=a.scale, multiplier=a.mult,
+        r = run_videos(a.input, a.output, scale=a.scale, multiplier=a.mult,
                       model=a.model, interp_model=a.interp, method=a.method,
                       budget_gb=a.budget_gb, max_batch=a.max_batch, crf=a.crf,
                       preset=a.preset, keep_audio=not a.no_audio,

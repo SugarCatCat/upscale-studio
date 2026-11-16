@@ -112,8 +112,8 @@ class Upscaler:
         """MPS 在批次过大时可能"静默"把某一帧算成全黑（不报错），这里显式拦截。"""
         if out.shape[0] < 2:
             return
-        a = src.mean(dim=(1, 2, 3))
-        b = out.mean(dim=(1, 2, 3))
+        a = src.mean(dim=(1, 2, 3)).float().cpu()
+        b = out.mean(dim=(1, 2, 3)).float().cpu()
         bad = (a > 0.02) & (b < a * 0.2)
         if bool(bad.any()):
             idx = [int(i) for i in bad.nonzero().flatten()]

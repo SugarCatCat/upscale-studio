@@ -22,7 +22,7 @@ from aiohttp import web
 
 from .. import registry
 from ..device import pick_device
-from ..pipeline import Canceled, run_images, run_video
+from ..pipeline import Canceled, run_images, run_videos
 
 ROOT = Path(__file__).resolve().parent.parent.parent     # 项目根
 WEB = ROOT / "upscaler" / "webui"
@@ -124,7 +124,7 @@ def run_job(job):
                        device=state["device"], emit=emit,
                        should_stop=job["_stop"].is_set)
         else:
-            run_video(job["src"], job["out_dir"], scale=p.get("scale", 2),
+            run_videos(job["src"], job["out_dir"], scale=p.get("scale", 2),
                       multiplier=p.get("multiplier", 2),
                       model=p.get("model", "RealESRGAN_x2plus.pth"),
                       interp_model=p.get("interp", "rife_v4.26.safetensors"),

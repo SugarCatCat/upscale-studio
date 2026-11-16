@@ -117,96 +117,137 @@ def frames_per_segment(w: int, h: int, mult: int, budget_gb: float,
     return seg, "内存" if by_mem <= by_int else "元素数上限"
 
 
-def run_video(src: str, out_dir: str, scale: float = 2.0, multiplier: int = 2,
-              model: str = "RealESRGAN_x2plus.pth", interp_model: str = "rife_v4.26.safetensors",
-              method: str = "lanczos", budget_gb: float = 4.0, max_batch: int = 96,
-              crf: int = 18, preset: str = "medium", keep_audio: bool = True,
-              device: str | None = None, emit=_noop, on_engine=None, should_stop=None) -> dict:
-    if not videoio.have_ffmpeg():
-        emit("error", "找不到 ffmpeg / ffprobe，请先安装（brew install ffmpeg）")
-        return {"ok": 0, "fail": 1}
+def list_videos(src: str, recursive: bool = True) -> list[Path]:
+    p = Path(src)
+    if p.is_file():
+        return [p]
+    it = p.rglob("*") if recursive else p.glob("*")
+    return sorted(f for f in it if f.is_file() and f.suffix.lower() in VID_EXT)
 
-    Path(out_dir).mkdir(parents=True, exist_ok=True)
-    info = videoio.probe(src)
+
+def _process_video_file(src: Path, out_dir: str, up, itp, mult: int, scale: float,
+                        method: str, budget_gb: float, max_batch: int, crf: int,
+                        preset: str, keep_audio: bool, emit, index: int, total: int) -> str:
+    """处理单个视频，返回输出文件名。失败抛异常，由调用方记 item_fail。"""
+    info = videoio.probe(str(src))
     fps = info["fps"]
     ow, oh = int(round(info["width"] * scale)), int(round(info["height"] * scale))
-    mult = max(1, int(multiplier))
     tag = "" if mult == 1 else f"{mult}xfps_"
-    dst = Path(out_dir) / f"{Path(src).stem}_{tag}{scale:g}x.mp4"
+    dst = Path(out_dir) / f"{src.stem}_{tag}{scale:g}x.mp4"
 
     emit("item_start",
-         f"{Path(src).name}  {info['width']}x{info['height']}@{fps:.2f} → {ow}x{oh}@{fps*mult:.2f}",
-         index=1, total=1, name=Path(src).name,
+         f"[{index}/{total}] {src.name}  {info['width']}x{info['height']}@{fps:.2f} → "
+         f"{ow}x{oh}@{fps * mult:.2f}",
+         index=index, total=total, name=src.name,
          src={"w": info["width"], "h": info["height"], "fps": round(fps, 2), "frames": info["frames"]},
          out_dims={"w": ow, "h": oh, "fps": round(fps * mult, 2)})
 
     seg, reason = frames_per_segment(ow, oh, mult, budget_gb, max_batch)
-    n_seg = (info["frames"] + seg - 1) // seg
-    emit("log", f"分段：每段 {seg} 源帧，共 {n_seg} 段（受{reason}限制）", segs=n_seg)
+    seg = min(seg, max(1, info["frames"]))        # 短视频不需要切段
+    n_seg = max(1, (info["frames"] + seg - 1) // seg)
+    emit("log", f"    分段：每段 {seg} 源帧，共 {n_seg} 段（受{reason}限制）", segs=n_seg)
 
-    up = Upscaler(str(registry.ensure(model)), device=device, budget_gb=budget_gb)
-    itp = Interpolator(str(registry.ensure(interp_model)), device=device) if mult > 1 else None
-    if on_engine:
-        on_engine({"upscaler": up, "interpolator": itp})
     post = scale / up.scale
-
     tmp_video = str(dst) + ".tmp.mp4"
     writer = videoio.VideoWriter(tmp_video, ow, oh, fps * mult, crf=crf, preset=preset)
-    written = 0
     aborted = False
     t0 = time.time()
     try:
         for s in range(n_seg):
-            if should_stop and should_stop():
-                raise Canceled()
             a = s * seg
             n = min(seg, info["frames"] - a)
-            # 第 2 段起向前多取 1 帧，随后丢掉这段的第 1 个输出帧，
-            # 这样交界处的「中间帧」也能生成，总帧数严格 = N*mult-1
+            # 第 2 段起向前多取 1 帧，随后丢掉该段第 1 个输出帧：
+            # 交界处的「中间帧」也能生成，总帧数严格 = N*mult-1
             overlap = 1 if (s > 0 and mult > 1) else 0
             start = max(0, a - overlap)
             count = n + overlap
-            frames = videoio.read_frames(src, info["width"], info["height"], start, count, fps)
+            frames = videoio.read_frames(str(src), info["width"], info["height"], start, count, fps)
             if frames.shape[0] == 0:
-                emit("log", f"  段 {s+1}: 读不到帧，跳过")
+                emit("log", f"    段 {s + 1}: 读不到帧，跳过")
                 continue
             if frames.shape[0] < count:
-                emit("log", f"  段 {s+1}: 只读到 {frames.shape[0]}/{count} 帧")
+                emit("log", f"    段 {s + 1}: 只读到 {frames.shape[0]}/{count} 帧")
             y = itp.interpolate(frames, mult) if itp else frames
             y = up.upscale(y)
             y = resize_to(y, post, method)
             if overlap:
                 y = y[1:]
             writer.write(y)
-            written += y.shape[0]
-            emit("progress", f"  段 {s+1}/{n_seg} OK {y.shape[0]} 帧 {time.time()-t0:.0f}s",
+            emit("progress", f"    段 {s + 1}/{n_seg} OK {y.shape[0]} 帧 {time.time() - t0:.0f}s",
                  seg=s + 1, segs=n_seg)
-    except Canceled:
+    except BaseException:
         aborted = True
         raise
     finally:
         try:
             writer.close()
-        except Exception as e:
-            emit("item_fail", f"编码失败：{e}", index=1, total=1, name=Path(src).name, error=str(e))
-            up.close()
-            if itp:
-                itp.close()
-            Path(tmp_video).unlink(missing_ok=True)
-            return {"ok": 0, "fail": 1}
-        up.close()
-        if itp:
-            itp.close()
-        if aborted:
-            Path(tmp_video).unlink(missing_ok=True)
+        finally:
+            if aborted:
+                Path(tmp_video).unlink(missing_ok=True)
 
-    videoio.mux_audio(tmp_video, src, str(dst), info["has_audio"] and keep_audio)
+    videoio.mux_audio(tmp_video, str(src), str(dst), info["has_audio"] and keep_audio)
     o = videoio.probe(str(dst))
     emit("item_done",
-         f"完成 -> {dst.name}  {o['width']}x{o['height']}@{o['fps']:.2f} {o['frames']}f "
-         f"时长 {o['duration']:.3f}s 音轨={o['has_audio']}",
-         index=1, total=1, name=Path(src).name, out=dst.name,
+         f"[{index}/{total}] OK {dst.name}  {o['width']}x{o['height']}@{o['fps']:.2f} "
+         f"{o['frames']}f 时长 {o['duration']:.3f}s 音轨={o['has_audio']}",
+         index=index, total=total, name=src.name, out=dst.name,
          info={"w": o["width"], "h": o["height"], "fps": round(o["fps"], 2),
-               "frames": o["frames"], "duration": round(o["duration"], 3), "audio": o["has_audio"]})
-    emit("job_done", f"完成：用时 {time.time()-t0:.0f}s", ok=1, fail=0, seconds=round(time.time() - t0))
-    return {"ok": 1, "fail": 0}
+               "frames": o["frames"], "duration": round(o["duration"], 3),
+               "audio": o["has_audio"]})
+    return dst.name
+
+
+def run_videos(src: str, out_dir: str, scale: float = 2.0, multiplier: int = 2,
+               model: str = "RealESRGAN_x2plus.pth", interp_model: str = "rife_v4.26.safetensors",
+               method: str = "lanczos", budget_gb: float = 4.0, max_batch: int = 96,
+               crf: int = 18, preset: str = "medium", keep_audio: bool = True,
+               device: str | None = None, emit=_noop, on_engine=None, should_stop=None) -> dict:
+    """src 可以是单个视频，也可以是目录（支持一次处理多个）。"""
+    if not videoio.have_ffmpeg():
+        emit("error", "找不到 ffmpeg / ffprobe，请先安装（brew install ffmpeg）")
+        return {"ok": 0, "fail": 1}
+
+    files = list_videos(src)
+    if not files:
+        emit("error", f"没找到视频：{src}")
+        return {"ok": 0, "fail": 1}
+
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+    mult = max(1, int(multiplier))
+    t_all = time.time()
+    emit("job_start",
+         f"视频 {len(files)} 个 | 模型 {model} | {mult} 倍补帧 | 目标 {scale:g}x",
+         mode="video", total=len(files),
+         params={"model": model, "multiplier": mult, "scale": scale})
+
+    ok = fail = 0
+    up = itp = None
+    try:
+        # 模型只加载一次，多个视频共用
+        up = Upscaler(str(registry.ensure(model)), device=device, budget_gb=budget_gb)
+        itp = Interpolator(str(registry.ensure(interp_model)), device=device) if mult > 1 else None
+        if on_engine:
+            on_engine({"upscaler": up, "interpolator": itp})
+
+        for i, f in enumerate(files, 1):
+            if should_stop and should_stop():
+                raise Canceled()
+            try:
+                _process_video_file(f, out_dir, up, itp, mult, scale, method, budget_gb,
+                                    max_batch, crf, preset, keep_audio, emit, i, len(files))
+                ok += 1
+            except (Canceled, KeyboardInterrupt):
+                raise
+            except Exception as e:
+                fail += 1
+                emit("item_fail", f"[{i}/{len(files)}] 失败 {f.name}: {e}",
+                     index=i, total=len(files), name=f.name, error=str(e))
+    finally:
+        if up:
+            up.close()
+        if itp:
+            itp.close()
+
+    emit("job_done", f"完成：成功 {ok} / 失败 {fail}，用时 {time.time() - t_all:.0f}s",
+         ok=ok, fail=fail, seconds=round(time.time() - t_all))
+    return {"ok": ok, "fail": fail}

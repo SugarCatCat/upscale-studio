@@ -118,9 +118,11 @@ def run_job(job):
 
     p = job["params"]
     caps = videoio.encoder_caps()
-    job["log"].append(f"[env] ffmpeg={videoio.ffmpeg_path()} ({caps.get('version', '')})")
-    job["log"].append(f"[env] libx264={caps.get('libx264')} preset={caps.get('preset')} "
-                      f"crf={caps.get('crf')} ffprobe={videoio.ffprobe_path()}")
+    job["log"].append(f"[env] encoder={caps.get('enc')} bin={caps.get('path')} "
+                      f"({caps.get('version', '')})")
+    job["log"].append(f"[env] scanned={[(c['path'], 'x264' if c['libx264'] else '-') for c in caps.get('scanned', [])]}")
+    job["log"].append(f"[env] preset={caps.get('preset')} crf={caps.get('crf')} "
+                      f"ffprobe={videoio.ffprobe_path()}")
     job["log"].append(f"[job] mode={job['mode']} params={json.dumps(p, ensure_ascii=False)}")
     job["log"].append(f"[job] src={job['src']} → out={job['out_dir']}")
     try:

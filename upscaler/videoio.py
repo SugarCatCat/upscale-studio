@@ -71,40 +71,97 @@ def have_ffmpeg() -> bool:
 
 _CAPS: dict = {}
 
+# 优先顺序：画质/兼容性最好的放前面。conda-forge 的 ffmpeg 不带 libx264（GPL 编码器），
+# 但通常带 h264_videotoolbox（Mac 硬件编码，快）和 libopenh264。
+_ENCODER_ORDER = ["libx264", "h264_videotoolbox", "libopenh264", "mpeg4"]
 
-def encoder_caps() -> dict:
-    """探测本机 ffmpeg 是否支持 libx264 的 -preset/-crf（探一次，缓存）。
 
-    有的 ffmpeg 构建/包装器会拒掉这两个选项（报 Unrecognized option 'preset'），
-    探测后按实际情况拼命令，而不是想当然地传。
-    """
-    if _CAPS:
-        return _CAPS
-    caps = {"libx264": False, "preset": False, "crf": False, "version": ""}
+def _runs(path: str) -> bool:
     try:
-        v = subprocess.run([ffmpeg_path(), "-hide_banner", "-version"],
-                           capture_output=True, text=True, timeout=10,
-                           creationflags=_NO_WINDOW)
+        r = subprocess.run([path, "-hide_banner", "-version"], capture_output=True,
+                           timeout=10, creationflags=_NO_WINDOW)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def _caps_for(path: str) -> dict:
+    caps = {"path": path, "libx264": False, "h264_videotoolbox": False,
+            "libopenh264": False, "mpeg4": False, "preset": False, "crf": False,
+            "version": ""}
+    try:
+        v = subprocess.run([path, "-hide_banner", "-version"], capture_output=True,
+                           text=True, timeout=10, creationflags=_NO_WINDOW)
         caps["version"] = (v.stdout or "").splitlines()[0] if v.stdout else ""
-        e = subprocess.run([ffmpeg_path(), "-hide_banner", "-encoders"],
-                           capture_output=True, text=True, timeout=10,
-                           creationflags=_NO_WINDOW)
-        caps["libx264"] = "libx264" in (e.stdout or "")
+        e = subprocess.run([path, "-hide_banner", "-encoders"], capture_output=True,
+                           text=True, timeout=15, creationflags=_NO_WINDOW)
+        out = e.stdout or ""
+        caps["libx264"] = " libx264 " in out
+        caps["h264_videotoolbox"] = "h264_videotoolbox" in out
+        caps["libopenh264"] = "libopenh264" in out
+        caps["mpeg4"] = " mpeg4 " in out
     except Exception as ex:
         caps["error"] = str(ex)
     if caps["libx264"]:
         try:
             r = subprocess.run(
-                [ffmpeg_path(), "-hide_banner", "-loglevel", "error",
-                 "-f", "lavfi", "-i", "nullsrc=s=64x64:d=0.1",
-                 "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-f", "null", "-"],
+                [path, "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+                 "-i", "nullsrc=s=64x64:d=0.1", "-c:v", "libx264",
+                 "-preset", "medium", "-crf", "18", "-f", "null", "-"],
                 capture_output=True, text=True, timeout=30, creationflags=_NO_WINDOW)
             caps["preset"] = caps["crf"] = r.returncode == 0
             if r.returncode != 0:
                 caps["probe_error"] = (r.stderr or "")[:300]
         except Exception as ex:
             caps["probe_error"] = str(ex)
-    _CAPS.update(caps)
+    return caps
+
+
+def encoder_caps() -> dict:
+    """挑一个「既有 x264、或者至少有别的 H.264 编码器」的 ffmpeg，并确定编码参数。
+
+    关键：光能跑不够——conda 环境里的 ffmpeg 能跑但没有 libx264，
+    所以要按可用编码器排序挑选，而不是取 PATH 里第一个。
+    """
+    if _CAPS:
+        return _CAPS
+    forced_bin = os.environ.get("UPSCALER_FFMPEG")
+    forced_enc = os.environ.get("UPSCALER_ENCODER")
+    cands = [forced_bin] if forced_bin else _candidates()
+    scanned = []
+    for c in cands:
+        if not (c and Path(c).exists() and _runs(c)):
+            continue
+        scanned.append(_caps_for(c))
+
+    chosen, enc = None, None
+    for key in _ENCODER_ORDER:                     # 先按编码器质量排
+        if forced_enc and forced_enc != key:
+            continue
+        for caps in scanned:
+            if caps.get(key):
+                chosen, enc = caps, key
+                break
+        if chosen:
+            break
+    if chosen is None and scanned:                 # 强制指定的编码器不存在 → 退回自动
+        for key in _ENCODER_ORDER:
+            for caps in scanned:
+                if caps.get(key):
+                    chosen, enc = caps, key
+                    break
+            if chosen:
+                break
+    if chosen is None:
+        chosen = {"path": shutil.which("ffmpeg") or "ffmpeg", "version": "", "error": "没有可用的 H.264 编码器"}
+        enc = None
+
+    _CAPS.update(chosen)
+    _CAPS["enc"] = enc
+    _BIN["ffmpeg"] = chosen["path"]
+    _BIN.pop("ffprobe", None)
+    _CAPS["scanned"] = [{k: c[k] for k in ("path", "version", "libx264",
+                                           "h264_videotoolbox", "libopenh264")} for c in scanned]
     return _CAPS
 
 
@@ -191,22 +248,36 @@ class VideoWriter:
         self.out_path = out_path
         self.w, self.h = width, height
         caps = encoder_caps()
-        if not caps.get("libx264"):
+        enc = caps.get("enc")
+        if not enc:
             raise RuntimeError(
-                f"当前 ffmpeg 不支持 libx264 编码（{ffmpeg_path()}）。"
-                f"请安装完整版：brew install ffmpeg。探测信息：{caps.get('version', '')}")
+                f"找不到可用的 H.264 编码器。已检查："
+                f"{[(c['path'], 'libx264' if c['libx264'] else '') for c in caps.get('scanned', [])]}"
+                f"。建议 brew install ffmpeg（或设置 UPSCALER_FFMPEG 指向完整版）")
 
         vf = []
         if width % 2 or height % 2:                     # yuv420p 要求偶数
             vf = ["-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2"]
-        cmd = [ffmpeg_path(), "-v", "error", "-nostdin", "-y",
+        cmd = [caps["path"], "-v", "error", "-nostdin", "-y",
                "-f", "rawvideo", "-pix_fmt", "rgb24",
-               "-s", f"{width}x{height}", "-r", f"{fps:.6f}", "-i", "-",
-               *vf, "-c:v", "libx264"]
-        if caps.get("preset"):
-            cmd += ["-preset", preset]
-        if caps.get("crf"):
-            cmd += ["-crf", str(crf)]
+               "-s", f"{width}x{height}", "-r", f"{fps:.6f}", "-i", "-", *vf]
+
+        if enc == "libx264":
+            cmd += ["-c:v", "libx264"]
+            if caps.get("preset"):
+                cmd += ["-preset", preset]
+            if caps.get("crf"):
+                cmd += ["-crf", str(crf)]
+        elif enc == "h264_videotoolbox":
+            # 硬件编码：质量 1~100，把 crf 粗略映射过去（crf18 ≈ 65）
+            q = max(1, min(100, int(round((51 - int(crf)) / 51 * 100))))
+            cmd += ["-c:v", "h264_videotoolbox", "-q:v", str(q), "-allow_sw", "1"]
+        elif enc == "libopenh264":
+            mbps = max(1.5, min(60.0, width * height * fps * 0.08 / 1e6))
+            cmd += ["-c:v", "libopenh264", "-b:v", f"{mbps:.1f}M"]
+        else:                                            # mpeg4 兜底
+            cmd += ["-c:v", "mpeg4", "-qscale:v", "2"]
+
         cmd += ["-pix_fmt", "yuv420p", "-movflags", "+faststart", out_path]
         self.cmd = cmd
 

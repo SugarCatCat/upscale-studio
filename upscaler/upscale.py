@@ -125,7 +125,7 @@ class Upscaler:
         """frames: (N,3,H,W) float32 [0,1]（CPU）。返回 (N,3,H*s,W*s)。"""
         n, _, h, w = frames.shape
         oh, ow = int(h * self.scale), int(w * self.scale)
-        chunk = frames_per_batch(h, w, oh, ow, self.budget_gb, self.tile)
+        chunk = frames_per_batch(h, w, oh, ow, self.budget_gb, self.tile, int(self.scale))
         outs = []
         for i in range(0, n, chunk):
             outs.append(self._upscale_chunk(frames[i:i + chunk]))

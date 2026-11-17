@@ -71,8 +71,10 @@ python -m upscaler.cli video -i a.mp4 -o ~/out --mult 1 --scale 2      # 只超�
    启动时会先跑一个 64×64 的空编码探测，不支持的选项自动去掉；ffmpeg 若在解析参数阶段就退出，
    `VideoWriter` 会在 0.3 秒内报错并把**完整命令**写进异常里（不会再白跑一整个分段）。
    ffmpeg/ffprobe 的路径会依次尝试 `$UPSCALER_FFMPEG` → PATH → `/opt/homebrew/bin` → `/usr/local/bin`。
-5. **tile=768 时单批不能超过 28 帧**：实测 32 帧会让 MPS **静默把末帧算成全黑**（不报错）。
-   代码已把上限压到 24，并内建「结果帧几乎全黑就抛错」的检测，宁可报错也不吐坏帧。
+5. **单批帧数要跟模型倍率一起算**：MPSGraph 张量过大时不是报错，是**直接段错误**
+   （`EXC_BAD_ACCESS` in `_mps_convolution`）。内部特征图 ≈ 帧数 × 64 × (tile × 倍率)²，
+   所以 `tile=768` 下：2× 模型约 21 帧、**4× 模型只能 5 帧**。
+   早期版本只按 tile 定死 24 帧，跑 4× 模型必崩。另有「末帧全黑」的检测兜底（宁可报错不吐坏帧）。
 
 ## 目录
 

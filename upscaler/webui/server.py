@@ -423,7 +423,14 @@ def main():
         p.mkdir(parents=True, exist_ok=True)
         save_settings({"output_dir": str(p)})
     print(f"upscale-studio → http://{a.host}:{a.port}")
-    web.run_app(make_app(), host=a.host, port=a.port, print=None)
+    try:
+        web.run_app(make_app(), host=a.host, port=a.port, print=None)
+    except OSError as e:
+        if getattr(e, "errno", None) == 48:
+            print(f"端口 {a.port} 已被占用：可能已经有一个实例在跑。"
+                  f"先停掉它（两个实例同时用 GPU 会崩），或用 --port 换一个。")
+            raise SystemExit(1)
+        raise
 
 
 if __name__ == "__main__":

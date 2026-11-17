@@ -36,24 +36,25 @@ def apply_mps_watermark():
         os.environ.setdefault("PYTORCH_MPS_LOW_WATERMARK_RATIO", "0.5")
 
 
-def mps_batch_limit(tile: int) -> int:
-    """单次送进模型的帧数上限，按 tile 大小取实测安全值。
+def mps_batch_limit(tile: int, scale: int = 1) -> int:
+    """单次送进模型的帧数上限。
 
-    MPS 单张量元素数上限 2^31-1，内部特征图 ≈ 帧数 × 64通道 × tile²：
-      tile=512 → 64 帧（实测 96 帧也能跑通）
-      tile=768 → 24 帧（实测 28 正常、**32 会静默丢末帧**，留足余量）
+    MPSGraph 在张量过大时不是报错，而是**直接段错误**（EXC_BAD_ACCESS in _mps_convolution），
+    所以必须按模型倍率一起算：内部特征图 ≈ 帧数 × 64通道 × (tile × scale)²。
+
+    基准来自实测：tile=768 / scale=2 / 24 帧 = 3.6e9 元素能稳定跑；
+    scale=4 时同样 24 帧会到 1.45e10，直接崩。这里按 3.2e9 留余量。
     """
-    if tile <= 512:
-        return 64
-    if tile <= 768:
-        return 24
-    return 16
+    area = (tile * scale) ** 2
+    by_elems = int(3.2e9 / (64 * area)) if area else 64
+    base = 64 if tile <= 512 else (24 if tile <= 768 else 16)
+    return max(1, min(base, by_elems))
 
 
 def frames_per_batch(h: int, w: int, out_h: int, out_w: int, budget_gb: float = 3.0,
-                     tile: int = 768) -> int:
+                     tile: int = 768, scale: int = 1) -> int:
     """按「输出帧张量占多少内存」和「INT_MAX 元素数」算一次能处理多少帧。"""
     per_frame_out = out_h * out_w * 3 * 4          # float32 累加缓冲
     by_mem = int(budget_gb * (1024 ** 3) / max(per_frame_out, 1))
     by_int = int(INT_MAX * 0.5 / max(out_h * out_w * 3, 1))
-    return max(1, min(by_mem, by_int, mps_batch_limit(tile)))
+    return max(1, min(by_mem, by_int, mps_batch_limit(tile, scale)))

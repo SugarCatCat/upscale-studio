@@ -22,7 +22,7 @@ from aiohttp import web
 
 from .. import registry, videoio
 from ..device import pick_device
-from ..pipeline import Canceled, run_images, run_videos
+from ..pipeline import Canceled, run_images, run_videos, VID_EXT
 
 ROOT = Path(__file__).resolve().parent.parent.parent     # 项目根
 WEB = ROOT / "upscaler" / "webui"
@@ -179,6 +179,7 @@ async def h_status(request):
         "engine": {"device": str(dev), "name": dev.type.upper()},
         "setup": state["setup"],
         "models": state["models"],
+        "model_meta": {m["name"]: m["scale"] for m in registry.MANIFEST if m["kind"] == "upscale"},
         "running": running,
         "queue": sum(1 for j in state["jobs"].values() if j["status"] == "queued"),
         "settings": load_settings(),
@@ -231,6 +232,50 @@ def _unique_dir(base: Path, mode: str) -> Path:
         k += 1
     d.mkdir(parents=True)
     return d
+
+
+def _video_info(path: Path, count: int) -> dict:
+    """统一成前端用的字段（w/h），避免和图片分支不一致。"""
+    i = videoio.probe(str(path))
+    return {"kind": "video", "count": count, "w": i["width"], "h": i["height"],
+            "fps": round(i["fps"], 3), "frames": i["frames"],
+            "duration": round(i["duration"], 3), "has_audio": i["has_audio"]}
+
+
+async def h_probe(request):
+    """探测本地路径的规格，用于界面上做耗时预估。只看元数据，不解码。"""
+    data = await request.json()
+    raw = (data.get("path") or "").strip()
+    if not raw:
+        raise web.HTTPBadRequest(text="path 为空")
+    p = Path(os.path.expanduser(raw)).resolve()
+    if not p.exists():
+        raise web.HTTPBadRequest(text=f"路径不存在：{p}")
+
+    if p.is_dir():
+        vids = sorted(f for f in p.iterdir()
+                      if f.is_file() and f.suffix.lower() in VID_EXT)
+        imgs = sorted(f for f in p.iterdir()
+                      if f.is_file() and f.suffix.lower() in (".png", ".jpg", ".jpeg",
+                                                              ".webp", ".bmp", ".tif", ".tiff"))
+        if vids:
+            return web.json_response(_video_info(vids[0], len(vids)))
+        if imgs:
+            from PIL import Image
+            with Image.open(imgs[0]) as im:
+                w, h = im.size
+            return web.json_response({"kind": "image", "count": len(imgs), "w": w, "h": h})
+        raise web.HTTPBadRequest(text="目录里没有可处理的视频或图片")
+
+    if p.suffix.lower() in VID_EXT:
+        return web.json_response(_video_info(p, 1))
+    try:
+        from PIL import Image
+        with Image.open(p) as im:
+            w, h = im.size
+        return web.json_response({"kind": "image", "count": 1, "w": w, "h": h})
+    except Exception as e:
+        raise web.HTTPBadRequest(text=f"无法识别的文件：{p.name}（{e}）")
 
 
 async def h_create(request):
@@ -398,6 +443,7 @@ def make_app():
     app.router.add_get("/api/jobs", h_jobs)
     app.router.add_get("/api/jobs/{id}", h_job)
     app.router.add_get("/api/jobs/{id}/log", h_log)
+    app.router.add_post("/api/probe", h_probe)
     app.router.add_post("/api/jobs", h_create)
     app.router.add_post("/api/jobs/{id}/cancel", h_cancel)
     app.router.add_delete("/api/jobs/{id}", h_delete)

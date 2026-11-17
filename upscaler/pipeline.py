@@ -198,7 +198,7 @@ def _process_video_file(src: Path, out_dir: str, up, itp, mult: int, scale: floa
 
 
 def run_videos(src: str, out_dir: str, scale: float = 2.0, multiplier: int = 2,
-               model: str = "RealESRGAN_x2plus.pth", interp_model: str = "rife_v4.26.safetensors",
+               model: str = "realesr-animevideov3.pth", interp_model: str = "rife_v4.26.safetensors",
                method: str = "lanczos", budget_gb: float = 4.0, max_batch: int = 96,
                crf: int = 18, preset: str = "medium", keep_audio: bool = True,
                device: str | None = None, emit=_noop, on_engine=None, should_stop=None) -> dict:

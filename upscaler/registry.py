@@ -44,6 +44,16 @@ MANIFEST = [
          sha256="985fba37421353716ef2fbd7fbbab061e76409994d168cf52527aa8ee53f81ec",
          url=f"{HF}/uwg/upscaler/resolve/main/ESRGAN/4xPSNR.pth",
          note="最保守保真"),
+    # 轻量模型（SRVGGNetCompact，0.6~1.2M 参数）：比 RRDBNet 快 20~37 倍，
+    # 细节重建略弱，但视频/动画素材几乎看不出差别
+    dict(name="realesr-animevideov3.pth", kind="upscale", scale=4, size=2504012,
+         sha256="b8a8376811077954d82ca3fcf476f1ac3da3e8a68a4f4d71363008000a18b75d",
+         url=f"{GH}/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-animevideov3.pth",
+         note="轻量·动画/视频首选，比 RRDBNet 快约 37 倍"),
+    dict(name="realesr-general-x4v3.pth", kind="upscale", scale=4, size=4885111,
+         sha256="8dc7edb9ac80ccdc30c3a5dca6616509367f05fbc184ad95b731f05bece96292",
+         url=f"{GH}/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-general-x4v3.pth",
+         note="轻量·通用（实拍也适用），速度约为 RRDBNet 的 15 倍"),
     # ---- 补帧 ----
     dict(name="rife_v4.26.safetensors", kind="interp", scale=1, size=22674688,
          sha256="151874592c877740e5db11522f4514df569eeafb0a0fcb2696f16e9e8d317c94",
@@ -56,6 +66,18 @@ MANIFEST = [
 ]
 
 BY_NAME = {m["name"]: m for m in MANIFEST}
+
+# 实测的每输出百万像素耗时（秒，M4 Pro / MPS，含分块开销）。
+# 这些数字只用于界面估时，不影响推理。
+SPEED_S_PER_MP = {
+    "RealESRGAN_x4plus.pth": 0.40,
+    "4x-UltraSharp.pth": 0.40,
+    "4x_foolhardy_Remacri.pth": 0.40,
+    "4xPSNR.pth": 0.40,
+    "RealESRGAN_x2plus.pth": 0.41,
+    "realesr-animevideov3.pth": 0.012,
+    "realesr-general-x4v3.pth": 0.021,
+}
 
 
 def sha256_of(path: Path, chunk=1 << 22) -> str:

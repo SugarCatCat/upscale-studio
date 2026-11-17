@@ -24,6 +24,9 @@ def _axis_weights(n: int, ov: int, left: bool, right: bool) -> torch.Tensor:
     return w
 
 
+FULL_FRAME_ELEMS = int(1.2e9)      # 整帧推理时内部特征图的元素上限（MPS 实测安全区）
+
+
 class Upscaler:
     def __init__(self, model_path: str, device: str | None = None,
                  tile: int = 768, overlap: int = 48, budget_gb: float = 3.0):
@@ -84,7 +87,10 @@ class Upscaler:
         n, c, h, w = chunk.shape
         s, tile, ov = int(self.scale), self.tile, self.overlap
         dev = chunk.to(self.device, self.dtype)
-        if h <= tile and w <= tile:                      # 小图：一次搞定
+        # 整帧推理比分块快 20~26%（省掉 tile 边界和多次调用），
+        # 只要内部特征图放得下就别分块；放不下再退回 tile。
+        full_frame = 64 * (h * s) * (w * s) <= FULL_FRAME_ELEMS
+        if full_frame or (h <= tile and w <= tile):
             with torch.no_grad():
                 out = self.model(dev).float().clamp_(0, 1)
             self._check_frames(chunk, out)
@@ -126,6 +132,10 @@ class Upscaler:
         n, _, h, w = frames.shape
         oh, ow = int(h * self.scale), int(w * self.scale)
         chunk = frames_per_batch(h, w, oh, ow, self.budget_gb, self.tile, int(self.scale))
+        if 64 * oh * ow <= FULL_FRAME_ELEMS:
+            # 整帧推理时单次调用已经吃满 GPU，实测批量没有额外收益（±1%），
+            # 逐帧调用还能把内存峰值压到最低（每帧内部张量 ≈ 64×输出像素×2 字节）。
+            chunk = 1
         outs = []
         for i in range(0, n, chunk):
             outs.append(self._upscale_chunk(frames[i:i + chunk]))

@@ -134,7 +134,7 @@ def run_job(job):
         else:
             run_videos(job["src"], job["out_dir"], scale=p.get("scale", 2),
                       multiplier=p.get("multiplier", 2),
-                      model=p.get("model", "RealESRGAN_x2plus.pth"),
+                      model=p.get("model", "realesr-animevideov3.pth"),
                       interp_model=p.get("interp", "rife_v4.26.safetensors"),
                       budget_gb=p.get("budget_gb", 4), emit=emit,
                       device=state["device"],
@@ -179,7 +179,9 @@ async def h_status(request):
         "engine": {"device": str(dev), "name": dev.type.upper()},
         "setup": state["setup"],
         "models": state["models"],
-        "model_meta": {m["name"]: m["scale"] for m in registry.MANIFEST if m["kind"] == "upscale"},
+        "model_meta": {m["name"]: {"scale": m["scale"],
+                                   "s_mp": registry.SPEED_S_PER_MP.get(m["name"], 0.4)}
+                       for m in registry.MANIFEST if m["kind"] == "upscale"},
         "running": running,
         "queue": sum(1 for j in state["jobs"].values() if j["status"] == "queued"),
         "settings": load_settings(),

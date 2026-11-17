@@ -204,8 +204,8 @@
     <div class="row"><button class="primary" data-run="video">开始处理</button></div>
     <div class="note">长视频会按「内存预算 + MPS 单张量上限」<b>自动切段</b>再拼接，不用手动切；
     帧率也不用管，按「源帧率 × 倍率」自动算。<br>
-    参考耗时（720p 60fps，每秒素材）：2 倍模型约 2 秒/帧，4 倍模型约 8.4 秒/帧 ——
-    出 4K 用「分辨率倍率 3 + RealESRGAN_x2plus」最划算，和出 1440p 一样快。</div>
+    参考耗时（720p 源）：轻量模型 <b>0.18 秒/帧</b>，x2plus 1.5 秒/帧，x4plus 5.9 秒/帧。<br>
+    追求速度选 <b>realesr-animevideov3</b>（快 30 倍，动画/CG 几乎看不出差别）；追求极致细节选 x4plus。</div>
   </section>
 
   <!-- 任务 -->
@@ -408,7 +408,7 @@ function fillModels(m){
     if (prefer) { const i = list.findIndex(x => x === prefer); if (i >= 0) sel.selectedIndex = i; }
   };
   fill($('#image-model'), up, '4x-UltraSharp.pth');
-  fill($('#video-model'), up, 'RealESRGAN_x2plus.pth');
+  fill($('#video-model'), up, 'realesr-animevideov3.pth');
   fill($('#video-interp'), fi, 'rife_v4.26.safetensors');
 }
 
@@ -611,9 +611,9 @@ function renderEst(mode) {
 
   if (mode === 'image') {
     const scale = +$('#image-scale').value;
-    const ms = modelMeta[$('#image-model').value] || 4;
+    const meta = modelMeta[$('#image-model').value] || { scale: 4, s_mp: 0.4 };
     const n = info.count || 1;
-    const per = EST.K_UP * info.w * info.h * ms * ms * f
+    const per = meta.s_mp * (info.w * info.h * meta.scale * meta.scale / 1e6) * f
               + EST.K_ENC * info.w * info.h * scale * scale * f;
     el.innerHTML = `预计 <b>${fmtDur(per * n)}</b>　${n} 张 × ${per.toFixed(1)} 秒`
       + `　输出 ${Math.round(info.w * scale)}×${Math.round(info.h * scale)}`
@@ -623,13 +623,13 @@ function renderEst(mode) {
 
   const scale = +$('#video-scale').value;
   const mult = +$('#video-mult').value;
-  const ms = modelMeta[$('#video-model').value] || 2;
+  const meta = modelMeta[$('#video-model').value] || { scale: 2, s_mp: 0.4 };
   const fps = info.fps || 30;
   const frames = info.frames || Math.round((info.duration || 0) * fps);
   if (!frames) { el.textContent = '读不到帧数，无法预估'; return; }
   const outFrames = mult > 1 ? frames * mult - 1 : frames;
   const finalPx = info.w * info.h * scale * scale;
-  const per = EST.K_UP * info.w * info.h * ms * ms * f
+  const per = meta.s_mp * (info.w * info.h * meta.scale * meta.scale / 1e6) * f
             + EST.K_ENC * finalPx * f
             + (mult > 1 ? EST.K_INTERP * (info.w * info.h / 921600) * f : 0);
   const budget = +$('#video-budget').value || 4;

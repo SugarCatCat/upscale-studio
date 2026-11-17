@@ -38,7 +38,8 @@ def main(argv=None):
 
     pv = sub.add_parser("video", help="视频补帧 + 超分")
     common(pv)
-    pv.add_argument("--model", default="RealESRGAN_x2plus.pth")
+    pv.add_argument("--model", default="realesr-animevideov3.pth",
+                    help="默认轻量模型（快 30 倍）；要极致细节换 RealESRGAN_x4plus.pth")
     pv.add_argument("--interp", default="rife_v4.26.safetensors")
     pv.add_argument("--mult", type=int, default=2, help="补帧倍率，1=只超分")
     pv.add_argument("--budget-gb", type=float, default=4.0)

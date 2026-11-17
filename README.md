@@ -56,8 +56,12 @@ python -m upscaler.cli video -i a.mp4 -o ~/out --mult 1 --scale 2      # 只超�
 
 | 类型 | 默认 | 其它 |
 |---|---|---|
-| 超分 | `RealESRGAN_x2plus`（视频）/ `4x-UltraSharp`（图片） | `RealESRGAN_x4plus`、`4x_foolhardy_Remacri`、`4xPSNR` |
+| 超分 | `realesr-animevideov3`（视频，轻量）/ `4x-UltraSharp`（图片） | `realesr-general-x4v3`、`RealESRGAN_x2plus`、`RealESRGAN_x4plus`、`4x_foolhardy_Remacri`、`4xPSNR` |
 | 补帧 | `rife_v4.26` | `rife_v4.25_lite` |
+
+**轻量模型（SRVGGNetCompact，0.6~1.2M 参数）是 Mac 上的关键提速手段**：比 RRDBNet 小 14~27 倍，
+720p→4K 单帧 **175 ms**（RRDBNet x4plus 是 5879 ms），保真度只低约 1 dB，1:1 对比几乎看不出差别。
+素材是实拍就换 `realesr-general-x4v3`（速度约为 RRDBNet 的 15 倍）。
 
 ## 两个必须知道的限制
 
@@ -118,9 +122,13 @@ upscale-studio/
 
 | 任务 | 耗时 |
 |---|---|
-| 160×120 → 320×240 | ≈0.3 s |
-| 720p 60 帧，2 倍补帧 + 2 倍超分（→1440p/119 帧） | 277 s（≈2.3 s/帧） |
-| 160×120 96 帧，10 段拼接 | ≈9 s，输出 191 帧、时长与源一致 |
+| 720p → 4K，轻量模型 | **0.18 s/帧** |
+| 720p → 4K，`RealESRGAN_x4plus` | 5.9 s/帧（整帧推理，原分块是 8.5 s） |
+| 720p → 1440p，`RealESRGAN_x2plus` | 1.5 s/帧 |
+| 端到端：720p@24fps 2 秒 → 4K（48 帧，含模型加载与编码） | **16 s** |
+
+**整帧推理**：只要内部特征图放得下（64 × 输出像素 ≤ 1.2e9），就不分块，直接整帧跑。
+实测比 tile 分块快 19~30%，且少了接缝风险；放不下（1080p→8K 那种）才自动退回分块。
 
 CPU 兜底大约慢 7~10 倍（小图 2 s vs 0.3 s），可用但别指望跑长视频。
 

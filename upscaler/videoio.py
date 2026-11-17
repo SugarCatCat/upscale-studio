@@ -39,7 +39,16 @@ def _candidates() -> list[str]:
     cands = [env] if env else []
     cands += [shutil.which("ffmpeg"), "/opt/homebrew/bin/ffmpeg",
               "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg"]
-    return [c for c in cands if c and Path(c).exists()]
+    seen, out = set(), []
+    for c in cands:                     # 去重（PATH 里的 ffmpeg 常常就是 homebrew 那个）
+        if not c:
+            continue
+        rp = str(Path(c).resolve())
+        if rp in seen or not Path(c).exists():
+            continue
+        seen.add(rp)
+        out.append(c)
+    return out
 
 
 def ffmpeg_path() -> str:

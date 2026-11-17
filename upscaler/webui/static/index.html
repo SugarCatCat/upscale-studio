@@ -105,6 +105,18 @@
         background:var(--panel-2);border:1px solid var(--border);border-radius:9px;padding:10px;
         max-height:170px;overflow:auto;margin-top:12px;white-space:pre-wrap}
   .empty{text-align:center;color:var(--muted);font-size:13px;padding:26px 0}
+  .modal{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:60;display:flex;
+         align-items:center;justify-content:center;padding:24px}
+  .modal.hidden{display:none}
+  .modal .box{background:var(--panel);border:1px solid var(--border);border-radius:14px;
+         width:min(1040px,96vw);height:min(78vh,760px);display:flex;flex-direction:column;
+         box-shadow:var(--shadow);overflow:hidden}
+  .modal .head{display:flex;align-items:center;gap:10px;padding:12px 16px;
+         border-bottom:1px solid var(--border);flex-wrap:wrap}
+  .modal .head b{font-size:13.5px}
+  .modal textarea{flex:1;width:100%;border:0;outline:none;resize:none;padding:14px 16px;
+         background:var(--panel-2);color:var(--text);
+         font:12px/1.65 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;word-break:break-word}
   .hidden{display:none!important}
 </style>
 </head>
@@ -184,9 +196,10 @@
       <div><label class="f">分段内存预算 (GB)</label><input type="number" id="video-budget" value="4" min="1" max="24" step="1"></div>
     </div>
     <div class="row"><button class="primary" data-run="video">开始处理</button></div>
-    <div class="note">长视频会<b>自动按 64 帧切段</b>再拼接（Apple MPS 单个张量元素数上限 21.4 亿，
-    帧数太多会报 <code>MPSGraph ... INT_MAX</code>），不用你手动切。1080p 建议预算 4~6GB；
-    帧率不用管，脚本会按「源帧率 × 倍率」自动算。</div>
+    <div class="note">长视频会按「内存预算 + MPS 单张量上限」<b>自动切段</b>再拼接，不用手动切；
+    帧率也不用管，按「源帧率 × 倍率」自动算。<br>
+    参考耗时（720p 60fps，每秒素材）：2 倍模型约 2 秒/帧，4 倍模型约 8.4 秒/帧 ——
+    出 4K 用「分辨率倍率 3 + RealESRGAN_x2plus」最划算，和出 1440p 一样快。</div>
   </section>
 
   <!-- 任务 -->
@@ -198,6 +211,21 @@
   <div id="jobs"><div class="empty">还没有任务。上面选好文件点开始即可。</div></div>
   <div class="note" id="outdir"></div>
 </main>
+
+<div class="modal hidden" id="logModal">
+  <div class="box">
+    <div class="head">
+      <b id="logTitle">任务日志</b>
+      <span class="meta" id="logMeta"></span>
+      <div class="spacer" style="flex:1"></div>
+      <button class="ghost" id="logRefresh">刷新</button>
+      <button class="ghost" id="logCopy">复制全部</button>
+      <button class="ghost" id="logDownload">下载 .log</button>
+      <button class="ghost" id="logClose">关闭</button>
+    </div>
+    <textarea id="logText" readonly spellcheck="false"></textarea>
+  </div>
+</div>
 
 <script>
 const $ = (s, r=document) => r.querySelector(s);
@@ -474,6 +502,7 @@ function jobCard(j){
       <span class="tag">${(j.inputs||[]).length} 个文件</span>
       <div class="spacer" style="flex:1"></div>
       <span class="meta">${elapsed ? elapsed.toFixed(0) + 's' : ''}</span>
+      <button class="ghost" onclick="openLog('${j.id}')">日志</button>
       <button class="ghost" onclick="delJob('${j.id}')">清除</button>
       ${(j.status==='running'||j.status==='queued') ? `<button class="ghost" onclick="cancelJob('${j.id}')">取消</button>` : ''}
     </div>
@@ -488,6 +517,45 @@ function jobCard(j){
     ${results}${logs}
   </div>`;
 }
+
+/* ---------------- 日志弹窗 ---------------- */
+let logJobId = null;
+async function openLog(id){
+  logJobId = id;
+  $('#logModal').classList.remove('hidden');
+  $('#logTitle').textContent = '任务日志 · ' + id;
+  await loadLog(true);
+}
+async function loadLog(scrollBottom){
+  if (!logJobId) return;
+  const t = await (await fetch(`/api/jobs/${logJobId}/log`)).text();
+  const ta = $('#logText');
+  ta.value = t || '(暂无日志)';
+  $('#logMeta').textContent = `${t.split('\n').length} 行`;
+  if (scrollBottom) ta.scrollTop = ta.scrollHeight;
+}
+$('#logClose').onclick = () => { $('#logModal').classList.add('hidden'); logJobId = null; };
+$('#logRefresh').onclick = () => loadLog(false);
+$('#logCopy').onclick = async () => {
+  const t = $('#logText').value, btn = $('#logCopy');
+  try { await navigator.clipboard.writeText(t); }
+  catch(e) {
+    const ta = $('#logText'); ta.focus(); ta.select();
+    try { document.execCommand('copy'); } catch(_) {}
+  }
+  btn.textContent = '已复制'; setTimeout(() => btn.textContent = '复制全部', 1500);
+};
+$('#logDownload').onclick = () => {
+  const blob = new Blob([$('#logText').value], { type: 'text/plain' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `job_${logJobId}.log`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+};
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && !$('#logModal').classList.contains('hidden')) $('#logClose').click();
+});
 
 async function refreshJobs(){
   try{

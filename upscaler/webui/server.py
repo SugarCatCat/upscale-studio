@@ -20,7 +20,7 @@ from pathlib import Path
 
 from aiohttp import web
 
-from .. import registry
+from .. import registry, videoio
 from ..device import pick_device
 from ..pipeline import Canceled, run_images, run_videos
 
@@ -110,13 +110,19 @@ def run_job(job):
             job["failed"] = data.get("fail")
         if msg:
             job["log"].append(msg)
-            if len(job["log"]) > 300:
-                job["log"] = job["log"][-150:]
+            if len(job["log"]) > 4000:          # 留全量，方便排查；只在极长时裁掉最早的
+                job["log"] = job["log"][-2000:]
         job["events"].append({"k": kind, "msg": msg, **{k: v for k, v in data.items() if k != "msg"}})
         if len(job["events"]) > 300:
             job["events"] = job["events"][-150:]
 
     p = job["params"]
+    caps = videoio.encoder_caps()
+    job["log"].append(f"[env] ffmpeg={videoio.ffmpeg_path()} ({caps.get('version', '')})")
+    job["log"].append(f"[env] libx264={caps.get('libx264')} preset={caps.get('preset')} "
+                      f"crf={caps.get('crf')} ffprobe={videoio.ffprobe_path()}")
+    job["log"].append(f"[job] mode={job['mode']} params={json.dumps(p, ensure_ascii=False)}")
+    job["log"].append(f"[job] src={job['src']} → out={job['out_dir']}")
     try:
         if job["mode"] == "image":
             run_images(job["src"], job["out_dir"], scale=p.get("scale", 2),
@@ -291,6 +297,16 @@ async def h_create(request):
     return web.json_response({"id": job["id"], "out_dir": str(out_dir)})
 
 
+async def h_log(request):
+    job = state["jobs"].get(request.match_info["id"])
+    if not job:
+        raise web.HTTPNotFound()
+    body = "\n".join(job["log"])
+    if job.get("error"):
+        body += f"\n\n[error] {job['error']}"
+    return web.Response(text=body, content_type="text/plain", charset="utf-8")
+
+
 async def h_cancel(request):
     job = state["jobs"].get(request.match_info["id"])
     if not job:
@@ -379,6 +395,7 @@ def make_app():
     app.router.add_post("/api/settings", h_settings)
     app.router.add_get("/api/jobs", h_jobs)
     app.router.add_get("/api/jobs/{id}", h_job)
+    app.router.add_get("/api/jobs/{id}/log", h_log)
     app.router.add_post("/api/jobs", h_create)
     app.router.add_post("/api/jobs/{id}/cancel", h_cancel)
     app.router.add_delete("/api/jobs/{id}", h_delete)

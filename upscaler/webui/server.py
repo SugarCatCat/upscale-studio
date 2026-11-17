@@ -139,6 +139,7 @@ def run_job(job):
                       budget_gb=p.get("budget_gb", 4), emit=emit,
                       device=state["device"],
                       keep_audio=not p.get("drop_audio"),
+                      async_pipeline=bool(p.get("async_pipeline")),
                       should_stop=job["_stop"].is_set)
         job["status"] = "canceled" if job["_stop"].is_set() else (
             "done" if job.get("failed", 0) == 0 else "error")

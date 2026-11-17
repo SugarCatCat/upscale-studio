@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import torch
@@ -127,7 +128,8 @@ def list_videos(src: str, recursive: bool = True) -> list[Path]:
 
 def _process_video_file(src: Path, out_dir: str, up, itp, mult: int, scale: float,
                         method: str, budget_gb: float, max_batch: int, crf: int,
-                        preset: str, keep_audio: bool, emit, index: int, total: int) -> str:
+                        preset: str, keep_audio: bool, emit, index: int, total: int,
+                        async_pipeline: bool = False) -> str:
     """处理单个视频，返回输出文件名。失败抛异常，由调用方记 item_fail。"""
     info = videoio.probe(str(src))
     fps = info["fps"]
@@ -149,19 +151,36 @@ def _process_video_file(src: Path, out_dir: str, up, itp, mult: int, scale: floa
 
     post = scale / up.scale
     tmp_video = str(dst) + ".tmp.mp4"
-    writer = videoio.VideoWriter(tmp_video, ow, oh, fps * mult, crf=crf, preset=preset)
+    writer = videoio.VideoWriter(tmp_video, ow, oh, fps * mult, crf=crf, preset=preset,
+                                 async_mode=async_pipeline)
     aborted = False
     t0 = time.time()
+
+    def plan(i):
+        a = i * seg
+        n = min(seg, info["frames"] - a)
+        # 第 2 段起向前多取 1 帧，随后丢掉该段第 1 个输出帧：
+        # 交界处的「中间帧」也能生成，总帧数严格 = N*mult-1
+        overlap = 1 if (i > 0 and mult > 1) else 0
+        return max(0, a - overlap), n + overlap, overlap
+
+    def read(i):
+        start, count, _ = plan(i)
+        return videoio.read_frames(str(src), info["width"], info["height"], start, count, fps)
+
+    pool = ThreadPoolExecutor(max_workers=1) if async_pipeline else None
+    pending = {}
     try:
+        if pool:
+            pending[0] = pool.submit(read, 0)
         for s in range(n_seg):
-            a = s * seg
-            n = min(seg, info["frames"] - a)
-            # 第 2 段起向前多取 1 帧，随后丢掉该段第 1 个输出帧：
-            # 交界处的「中间帧」也能生成，总帧数严格 = N*mult-1
-            overlap = 1 if (s > 0 and mult > 1) else 0
-            start = max(0, a - overlap)
-            count = n + overlap
-            frames = videoio.read_frames(str(src), info["width"], info["height"], start, count, fps)
+            start, count, overlap = plan(s)
+            if pool:
+                frames = pending.pop(s).result()
+                if s + 1 < n_seg:
+                    pending[s + 1] = pool.submit(read, s + 1)
+            else:
+                frames = read(s)
             if frames.shape[0] == 0:
                 emit("log", f"    段 {s + 1}: 读不到帧，跳过")
                 continue
@@ -179,6 +198,8 @@ def _process_video_file(src: Path, out_dir: str, up, itp, mult: int, scale: floa
         aborted = True
         raise
     finally:
+        if pool:
+            pool.shutdown(wait=False, cancel_futures=True)
         try:
             writer.close()
         finally:
@@ -201,8 +222,13 @@ def run_videos(src: str, out_dir: str, scale: float = 2.0, multiplier: int = 2,
                model: str = "realesr-animevideov3.pth", interp_model: str = "rife_v4.26.safetensors",
                method: str = "lanczos", budget_gb: float = 4.0, max_batch: int = 96,
                crf: int = 18, preset: str = "medium", keep_audio: bool = True,
-               device: str | None = None, emit=_noop, on_engine=None, should_stop=None) -> dict:
-    """src 可以是单个视频，也可以是目录（支持一次处理多个）。"""
+               device: str | None = None, emit=_noop, on_engine=None, should_stop=None,
+               async_pipeline: bool = False) -> dict:
+    """src 可以是单个视频，也可以是目录（支持一次处理多个）。
+
+    async_pipeline=True 时：解码预取下一段 + 编码写盘放到后台线程，
+    把 float→uint8 转换和管道阻塞与 GPU 推理重叠（内存占用略增）。
+    """
     if not videoio.have_ffmpeg():
         emit("error", "找不到 ffmpeg / ffprobe，请先安装（brew install ffmpeg）")
         return {"ok": 0, "fail": 1}
@@ -234,7 +260,8 @@ def run_videos(src: str, out_dir: str, scale: float = 2.0, multiplier: int = 2,
                 raise Canceled()
             try:
                 _process_video_file(f, out_dir, up, itp, mult, scale, method, budget_gb,
-                                    max_batch, crf, preset, keep_audio, emit, i, len(files))
+                                    max_batch, crf, preset, keep_audio, emit, i, len(files),
+                                    async_pipeline=async_pipeline)
                 ok += 1
             except (Canceled, KeyboardInterrupt):
                 raise

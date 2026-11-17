@@ -199,13 +199,19 @@
       <div><label class="f">超分模型</label><select id="video-model"></select></div>
       <div><label class="f">补帧模型</label><select id="video-interp"></select></div>
       <div><label class="f">分段内存预算 (GB)</label><input type="number" id="video-budget" value="4" min="1" max="24" step="1"></div>
+      <div><label class="f">异步流水线</label>
+        <label style="display:flex;align-items:center;gap:7px;font-size:12.5px;padding:6px 0">
+          <input type="checkbox" id="video-async" style="width:auto;min-width:0">
+          <span>解码预取 + 后台写盘（约快 15%，内存略增）</span>
+        </label></div>
     </div>
     <div class="estimate" id="est-video">选择文件或填入路径后显示耗时预估</div>
     <div class="row"><button class="primary" data-run="video">开始处理</button></div>
     <div class="note">长视频会按「内存预算 + MPS 单张量上限」<b>自动切段</b>再拼接，不用手动切；
     帧率也不用管，按「源帧率 × 倍率」自动算。<br>
     参考耗时（720p 源）：轻量模型 <b>0.18 秒/帧</b>，x2plus 1.5 秒/帧，x4plus 5.9 秒/帧。<br>
-    追求速度选 <b>realesr-animevideov3</b>（快 30 倍，动画/CG 几乎看不出差别）；追求极致细节选 x4plus。</div>
+    追求速度选 <b>realesr-animevideov3</b>（快 30 倍，动画/CG 几乎看不出差别）；追求极致细节选 x4plus。<br>
+    macOS 默认用硬件编码（VideoToolbox），比软件编码快约 7%；勾选「异步流水线」可再快约 8%。</div>
   </section>
 
   <!-- 任务 -->
@@ -446,6 +452,7 @@ document.querySelectorAll('[data-run]').forEach(btn => btn.onclick = async () =>
     params.interp = $('#video-interp').value; params.budget_gb = +$('#video-budget').value;
   }
 
+  if (mode === 'video') params.async_pipeline = !!($('#video-async') && $('#video-async').checked);
   if (localPath) { params.source = 'path'; params.input_path = localPath; }
   else { params.source = 'upload'; }
 

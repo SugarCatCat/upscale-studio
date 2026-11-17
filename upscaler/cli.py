@@ -47,6 +47,8 @@ def main(argv=None):
     pv.add_argument("--crf", type=int, default=18)
     pv.add_argument("--preset", default="medium")
     pv.add_argument("--no-audio", action="store_true")
+    pv.add_argument("--async", dest="async_pipeline", action="store_true",
+                    help="异步流水线：解码预取 + 后台写盘，更快但内存略增")
 
     a = ap.parse_args(argv)
     emit = _printer()

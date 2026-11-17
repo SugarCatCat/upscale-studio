@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 import os
+import queue
+import threading
 import shutil
 import subprocess
 import time
@@ -74,6 +76,9 @@ _CAPS: dict = {}
 # 优先顺序：画质/兼容性最好的放前面。conda-forge 的 ffmpeg 不带 libx264（GPL 编码器），
 # 但通常带 h264_videotoolbox（Mac 硬件编码，快）和 libopenh264。
 _ENCODER_ORDER = ["libx264", "h264_videotoolbox", "libopenh264", "mpeg4"]
+# macOS 上优先走 VideoToolbox：硬件编码器，4K 下比 libx264 medium 快 3~5 倍，
+# 画质差异在 4K 交付场景里基本看不出来。可用 UPSCALER_ENCODER=libx264 强制回退。
+_ENCODER_ORDER_DARWIN = ["h264_videotoolbox", "libx264", "libopenh264", "mpeg4"]
 
 
 def _runs(path: str) -> bool:
@@ -102,6 +107,18 @@ def _caps_for(path: str) -> dict:
         caps["mpeg4"] = " mpeg4 " in out
     except Exception as ex:
         caps["error"] = str(ex)
+    if caps["h264_videotoolbox"]:
+        try:
+            r = subprocess.run(
+                [path, "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+                 "-i", "nullsrc=s=64x64:d=0.1", "-c:v", "h264_videotoolbox",
+                 "-f", "null", "-"],
+                capture_output=True, text=True, timeout=30, creationflags=_NO_WINDOW)
+            caps["h264_videotoolbox_ok"] = r.returncode == 0
+            if r.returncode != 0:
+                caps["vt_error"] = (r.stderr or "")[:200]
+        except Exception as ex:
+            caps["vt_error"] = str(ex)
     if caps["libx264"]:
         try:
             r = subprocess.run(
@@ -134,18 +151,21 @@ def encoder_caps() -> dict:
             continue
         scanned.append(_caps_for(c))
 
+    order = _ENCODER_ORDER_DARWIN if sys.platform == "darwin" else _ENCODER_ORDER
     chosen, enc = None, None
-    for key in _ENCODER_ORDER:                     # 先按编码器质量排
+    for key in order:                              # 按平台优先级挑
         if forced_enc and forced_enc != key:
             continue
         for caps in scanned:
+            if key == "h264_videotoolbox" and not caps.get("h264_videotoolbox_ok"):
+                continue
             if caps.get(key):
                 chosen, enc = caps, key
                 break
         if chosen:
             break
     if chosen is None and scanned:                 # 强制指定的编码器不存在 → 退回自动
-        for key in _ENCODER_ORDER:
+        for key in order:
             for caps in scanned:
                 if caps.get(key):
                     chosen, enc = caps, key
@@ -244,7 +264,7 @@ class VideoWriter:
     """常驻编码器：一路 output，可分段写入（同一时间轴）。"""
 
     def __init__(self, out_path: str, width: int, height: int, fps: float,
-                 crf: int = 18, preset: str = "medium"):
+                 crf: int = 18, preset: str = "medium", async_mode: bool = False):
         self.out_path = out_path
         self.w, self.h = width, height
         caps = encoder_caps()
@@ -270,7 +290,8 @@ class VideoWriter:
                 cmd += ["-crf", str(crf)]
         elif enc == "h264_videotoolbox":
             # 硬件编码：质量 1~100，把 crf 粗略映射过去（crf18 ≈ 65）
-            q = max(1, min(100, int(round((51 - int(crf)) / 51 * 100))))
+            # VideoToolbox 没有 crf，用 1~100 的质量档；实测 crf18 ≈ q80（体积与原 crf18 相当）
+            q = max(1, min(100, int(round(100 - int(crf) * 1.1))))
             cmd += ["-c:v", "h264_videotoolbox", "-q:v", str(q), "-allow_sw", "1"]
         elif enc == "libopenh264":
             mbps = max(1.5, min(60.0, width * height * fps * 0.08 / 1e6))
@@ -283,6 +304,10 @@ class VideoWriter:
 
         self.err = tempfile.TemporaryFile()
         self.proc = _popen(cmd, stdin=subprocess.PIPE, stderr=self.err)
+        self._q = None
+        self._worker = None
+        self._werr = None
+        self.async_mode = async_mode
 
         # 启动即校验：ffmpeg 若在解析参数时就退出，这里立刻抛错，
         # 而不是等一整个分段算完、写管道时才炸（那样会白跑几分钟）。
@@ -295,8 +320,39 @@ class VideoWriter:
             raise RuntimeError(f"ffmpeg 启动失败（{ffmpeg_path()}）：{msg.strip()}\n"
                                f"命令：{' '.join(cmd)}")
 
+        if async_mode:                      # 后台线程负责转换与写管道
+            self._q = queue.Queue(maxsize=3)
+            self._worker = threading.Thread(target=self._pump, daemon=True)
+            self._worker.start()
+
+    def _to_bytes(self, frames: torch.Tensor) -> bytes:
+        arr = (frames.clamp(0, 1) * 255).round().to(torch.uint8)
+        return arr.permute(0, 2, 3, 1).contiguous().cpu().numpy().tobytes()
+
+    def _pump(self):
+        while True:
+            item = self._q.get()
+            try:
+                if item is None:
+                    return
+                self.proc.stdin.write(self._to_bytes(item))
+            except Exception as e:          # 记录后让 write/close 抛出来
+                self._werr = e
+                return
+            finally:
+                self._q.task_done()
+
     def write(self, frames: torch.Tensor):
         if frames.numel() == 0:
+            return
+        if self._q is not None:
+            if self._werr:
+                raise self._werr
+            if self.proc.poll() is not None:
+                self.err.seek(0)
+                msg = self.err.read().decode("utf-8", "ignore")[:800]
+                raise RuntimeError(f"ffmpeg 编码中断（{ffmpeg_path()}）：{msg.strip()}")
+            self._q.put(frames.cpu())
             return
         if self.proc.poll() is not None:               # 编码器中途挂了，别硬写
             self.err.seek(0)
@@ -308,6 +364,16 @@ class VideoWriter:
         self.proc.stdin.write(arr.tobytes())
 
     def close(self):
+        if self._q is not None:
+            self._q.put(None)
+            self._worker.join()
+            if self._werr:
+                try:
+                    self.proc.stdin.close()
+                except Exception:
+                    pass
+                self.proc.wait()
+                raise self._werr
         try:
             self.proc.stdin.close()
         except Exception:

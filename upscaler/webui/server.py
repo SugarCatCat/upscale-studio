@@ -27,6 +27,7 @@ from ..pipeline import Canceled, run_images, run_videos, VID_EXT
 ROOT = Path(__file__).resolve().parent.parent.parent     # 项目根
 WEB = ROOT / "upscaler" / "webui"
 UPLOADS = ROOT / "workspace" / "uploads"
+STAGING = ROOT / "workspace" / ".staging"      # 选了浏览器文件夹时的中转目录
 OUTPUTS = ROOT / "workspace" / "outputs"
 SETTINGS_FILE = ROOT / "workspace" / "settings.json"
 
@@ -86,7 +87,7 @@ def new_job(mode, params, inputs, jid, src, out_dir):
         "source": params.get("source", "upload"),
         "status": "queued", "created": time.time(), "started": None, "finished": None,
         "events": [], "index": 0, "total": len(inputs), "seq": 0, "segs": 0,
-        "outputs": [], "error": None, "log": [],
+        "outputs": [], "completed": [], "error": None, "log": [],
         "_stop": threading.Event(),
     }
     state["jobs"][jid] = job
@@ -102,6 +103,12 @@ def run_job(job):
             job["index"] = data.get("index", job["index"])
             job["total"] = data.get("total", job["total"])
             job["seq"], job["segs"] = 0, 0
+            if kind == "item_done":
+                # 单个视频收尾即交付：立刻刷新输出列表，界面/浏览器拷贝都能马上拿到
+                name = data.get("out")
+                if name and name not in job["completed"]:
+                    job["completed"].append(name)
+                collect(job)
         elif kind == "progress":
             job["seq"] = data.get("seg", 0)
             job["segs"] = data.get("segs", 0)
@@ -159,7 +166,8 @@ def collect(job):
     files = []
     if d.is_dir():
         for f in sorted(d.iterdir()):
-            if f.is_file() and not f.name.startswith("."):
+            if f.is_file() and not f.name.startswith(".") \
+                    and ".tmp." not in f.name and ".part." not in f.name:
                 files.append({"name": f.name, "size": f.stat().st_size})
     job["outputs"] = files
 
@@ -332,16 +340,25 @@ async def h_create(request):
         src = saved[0] if len(saved) == 1 else updir
         inputs = [p.name for p in saved]
 
-    base_raw = (params.get("output_dir") or "").strip() or load_settings()["output_dir"]
-    base = Path(os.path.expanduser(base_raw)).resolve()
-    try:
-        base.mkdir(parents=True, exist_ok=True)
-    except Exception as e:
-        raise web.HTTPBadRequest(text=f"输出目录不可用：{base}（{e}）")
-    out_dir = _unique_dir(base, mode)
-    save_settings({"output_dir": str(base)})
-
     jid = jid or uuid.uuid4().hex[:10]
+
+    # 三种情况：
+    #   ① 界面上选了文件夹（浏览器写入）→ 只写进临时暂存目录，交付后由页面搬到所选文件夹，
+    #      不往默认输出目录里堆一份；
+    #   ② 填了服务器路径 → 直接写那个目录；
+    #   ③ 都没指定 → 默认输出目录。
+    if params.get("deliver_browser"):
+        out_dir = STAGING / jid
+        out_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        base_raw = (params.get("output_dir") or "").strip() or load_settings()["output_dir"]
+        base = Path(os.path.expanduser(base_raw)).resolve()
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            raise web.HTTPBadRequest(text=f"输出目录不可用：{base}（{e}）")
+        out_dir = _unique_dir(base, mode)
+        save_settings({"output_dir": str(base)})
     job = new_job(mode, params, inputs, jid, src, out_dir)
     state["queue"].put_nowait(job)
     return web.json_response({"id": job["id"], "out_dir": str(out_dir)})

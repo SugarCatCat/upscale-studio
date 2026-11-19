@@ -397,14 +397,23 @@ class VideoWriter:
 
 
 def mux_audio(video: str, source: str, out: str, has_audio: bool):
-    """把源音轨混进编码结果（视频流直接 copy，不二次压缩）。"""
-    if not has_audio:
-        Path(video).replace(out)
-        return
-    cmd = [ffmpeg_path(), "-v", "error", "-nostdin", "-y", "-i", video, "-i", source,
-           "-map", "0:v:0", "-map", "1:a:0?", "-c:v", "copy",
-           "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", out]
-    r = subprocess.run(cmd, capture_output=True, creationflags=_NO_WINDOW)
-    if r.returncode != 0:
-        raise RuntimeError("混流失败: " + r.stderr.decode("utf-8", "ignore")[:400])
-    Path(video).unlink(missing_ok=True)
+    """把源音轨混进编码结果（视频流直接 copy，不二次压缩）。
+
+    始终先写 `out.part` 再原子改名：这样最终文件一出现就是完整的，
+    外部（界面/浏览器拷贝/用户）不会读到写了一半的文件。
+    """
+    part = out + ".part.mp4"
+    try:
+        if not has_audio:
+            Path(video).replace(part)
+        else:
+            cmd = [ffmpeg_path(), "-v", "error", "-nostdin", "-y", "-i", video, "-i", source,
+                   "-map", "0:v:0", "-map", "1:a:0?", "-c:v", "copy",
+                   "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", part]
+            r = subprocess.run(cmd, capture_output=True, creationflags=_NO_WINDOW)
+            if r.returncode != 0:
+                raise RuntimeError("混流失败: " + r.stderr.decode("utf-8", "ignore")[:400])
+            Path(video).unlink(missing_ok=True)
+        Path(part).replace(out)
+    finally:
+        Path(part).unlink(missing_ok=True)

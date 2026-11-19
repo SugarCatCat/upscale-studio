@@ -279,7 +279,7 @@ $('#pickOut').onclick = async () => {
       alert('没有拿到写入权限'); return;
     }
     outHandle = h; renderOut();
-    outdirMsg.className = 'ok'; outdirMsg.textContent = '任务完成后会写入这个文件夹';
+    outdirMsg.className = 'ok'; outdirMsg.textContent = '每处理完一个文件就立即写入这个文件夹';
     setTimeout(() => { outdirMsg.textContent = ''; }, 3000);
   } catch (e) {
     if (e.name !== 'AbortError') alert('选择文件夹失败：' + e.message);
@@ -287,25 +287,47 @@ $('#pickOut').onclick = async () => {
 };
 $('#clearOut').onclick = () => { outHandle = null; renderOut(); outdirMsg.textContent = ''; };
 
-async function deliverJob(job) {
+const copiedByJob = {};      // jobId -> Set(文件名)，避免重复写
+const dirByJob = {};         // jobId -> FileSystemDirectoryHandle
+
+// 一个视频处理完就立刻写进所选文件夹，不等整批任务结束。
+// 轮询会每 1.5 秒调一次，必须按任务串行，否则同一文件会被并发写两遍。
+const deliverChain = {};
+function deliverJob(job) {
+  const prev = deliverChain[job.id] || Promise.resolve();
+  const next = prev.then(() => doDeliverJob(job)).catch(() => {});
+  deliverChain[job.id] = next;
+  return next;
+}
+
+async function doDeliverJob(job) {
   const rec = handleByJob[job.id];
-  if (!rec || delivered.has(job.id) || job.status !== 'done') return;
-  delivered.add(job.id);
-  const label = `${rec.handle.name}/${rec.sub}`;
+  if (!rec) return;
+  const doneList = job.completed || [];
+  const copied = copiedByJob[job.id] || (copiedByJob[job.id] = new Set());
+  const todo = doneList.filter(n => !copied.has(n));
+  if (!todo.length) return;
+
+  const label = rec.handle.name;
   try {
-    const dir = await rec.handle.getDirectoryHandle(rec.sub, { create: true });
-    for (const o of (job.outputs || [])) {
-      const res = await fetch(`/files/${job.id}/${encodeURIComponent(o.name)}`);
-      if (!res.ok) throw new Error(`${o.name}: HTTP ${res.status}`);
-      const fh = await dir.getFileHandle(o.name, { create: true });
+    if (!dirByJob[job.id]) {
+      dirByJob[job.id] = await rec.handle.getDirectoryHandle(rec.sub, { create: true });
+    }
+    const dir = dirByJob[job.id];
+    for (const name of todo) {
+      const res = await fetch(`/files/${job.id}/${encodeURIComponent(name)}`);
+      if (!res.ok) throw new Error(`${name}: HTTP ${res.status}`);
+      const fh = await dir.getFileHandle(name, { create: true });
       const w = await fh.createWritable();
       if (res.body && res.body.pipeTo) await res.body.pipeTo(w);
       else { await w.write(await res.blob()); await w.close(); }
+      copied.add(name);
     }
-    outdirMsg.className = 'ok'; outdirMsg.textContent = `已写入 ${label}`;
+    outdirMsg.className = 'ok';
+    outdirMsg.textContent = `已写入 ${label}（${copied.size}/${doneList.length}）`;
   } catch (e) {
     outdirMsg.style.color = 'var(--err)';
-    outdirMsg.textContent = `写入失败（${label}）：${e.message}`;
+    outdirMsg.textContent = `写入 ${label} 失败：${e.message}`;
   }
 }
 
@@ -463,7 +485,9 @@ document.querySelectorAll('[data-run]').forEach(btn => btn.onclick = async () =>
   btn.disabled = true; const old = btn.textContent; btn.textContent = '上传中…';
   try{
     if (outHandle) {
-      params.output_dir = '';  // 走服务器默认目录，跑完由浏览器搬到所选文件夹
+      // 选了文件夹：服务端只写临时暂存目录（不往默认输出目录堆），页面逐个搬到所选文件夹
+      params.output_dir = '';
+      params.deliver_browser = true;
       fd.set('params', JSON.stringify(params));
     }
     const r = await fetch('/api/jobs', { method:'POST', body: fd });
@@ -473,6 +497,8 @@ document.querySelectorAll('[data-run]').forEach(btn => btn.onclick = async () =>
       const d = new Date(), p = n => String(n).padStart(2,'0');
       const sub = `${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}_${mode}`;
       handleByJob[created.id] = { handle: outHandle, sub };
+      copiedByJob[created.id] = new Set();
+      delete dirByJob[created.id];
     }
     selected[mode] = []; renderChips(mode);
     await refreshJobs();
@@ -698,7 +724,7 @@ async function refreshJobs(){
     const box = $('#jobs');
     if (!jobs.length) { box.innerHTML = '<div class="empty">还没有任务。上面选好文件点开始即可。</div>'; return; }
     box.innerHTML = jobs.map(jobCard).join('');
-    jobs.filter(j => j.status === 'done').forEach(deliverJob);
+    jobs.filter(j => (j.completed || []).length).forEach(deliverJob);
   }catch(e){}
 }
 async function cancelJob(id){ await fetch(`/api/jobs/${id}/cancel`, {method:'POST'}); refreshJobs(); }

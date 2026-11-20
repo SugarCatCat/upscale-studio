@@ -335,6 +335,8 @@ class VideoWriter:
             self._worker.start()
 
     def _to_bytes(self, frames: torch.Tensor) -> bytes:
+        if frames.dtype == torch.uint8:          # 已经在 GPU 上转好 8bit
+            return frames.permute(0, 2, 3, 1).contiguous().numpy().tobytes()
         arr = (frames.clamp(0, 1) * 255).round().to(torch.uint8)
         return arr.permute(0, 2, 3, 1).contiguous().cpu().numpy().tobytes()
 
@@ -368,8 +370,9 @@ class VideoWriter:
             msg = self.err.read().decode("utf-8", "ignore")[:800]
             raise RuntimeError(f"ffmpeg 编码中断（{ffmpeg_path()}）：{msg.strip()}\n"
                                f"命令：{' '.join(self.cmd)}")
-        arr = (frames.clamp(0, 1) * 255).round().to(torch.uint8)
-        arr = arr.permute(0, 2, 3, 1).contiguous().cpu().numpy()
+        if frames.dtype != torch.uint8:
+            frames = (frames.clamp(0, 1) * 255).round().to(torch.uint8)
+        arr = frames.permute(0, 2, 3, 1).contiguous().cpu().numpy()
         self.proc.stdin.write(arr.tobytes())
 
     def close(self):

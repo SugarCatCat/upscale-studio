@@ -257,7 +257,6 @@ document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
 const outdirInput = $('#outdir'), outdirMsg = $('#outdirMsg');
 let outHandle = null;                 // 浏览器选中的目录句柄
 const handleByJob = {};               // jobId -> {handle, sub}
-const delivered = new Set();
 
 function renderOut(){
   const picked = !!outHandle;

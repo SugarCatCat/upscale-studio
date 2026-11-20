@@ -168,7 +168,9 @@ def _process_video_file(src: Path, out_dir: str, up, itp, mult: int, scale: floa
         start, count, _ = plan(i)
         return videoio.read_frames(str(src), info["width"], info["height"], start, count, fps)
 
-    pool = ThreadPoolExecutor(max_workers=1) if async_pipeline else None
+    # 解码预取常开：只多占一个分段的源帧内存（720p/43 帧约 116MB），
+    # 却能盖住每段开头 ffmpeg 解码 1~2 秒的 GPU 空转。
+    pool = ThreadPoolExecutor(max_workers=1)
     pending = {}
     try:
         if pool:
@@ -187,11 +189,14 @@ def _process_video_file(src: Path, out_dir: str, up, itp, mult: int, scale: floa
             if frames.shape[0] < count:
                 emit("log", f"    段 {s + 1}: 只读到 {frames.shape[0]}/{count} 帧")
             y = itp.interpolate(frames, mult) if itp else frames
-            y = up.upscale(y)
-            y = resize_to(y, post, method)
+            # 优先在 GPU 上完成缩放与 8bit 转换，只回传 uint8（4K 下省 ~60ms/帧）；
+            # 超大图放不下整帧时退回浮点路径。
+            y8 = up.upscale_u8(y, post, method)
+            if y8 is None:
+                y8 = resize_to(up.upscale(y), post, method)
             if overlap:
-                y = y[1:]
-            writer.write(y)
+                y8 = y8[1:]
+            writer.write(y8)
             emit("progress", f"    段 {s + 1}/{n_seg} OK {y.shape[0]} 帧 {time.time() - t0:.0f}s",
                  seg=s + 1, segs=n_seg)
     except BaseException:

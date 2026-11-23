@@ -34,7 +34,7 @@ run.bat           :: Windows
 
 ```bash
 python -m upscaler.cli doctor                       # 只检查/下载模型
-python -m upscaler.cli image -i ~/Pics/in -o ~/out --scale 2
+python -m upscaler.cli image -i ~/Pics/in -o ~/out --scale 2   # 支持带透明通道的 PNG
 python -m upscaler.cli video -i a.mp4 -o ~/out --mult 2 --scale 2
 python -m upscaler.cli video -i ~/Videos/in -o ~/out --mult 2 --scale 2   # 目录：逐个处理
 python -m upscaler.cli video -i a.mp4 -o ~/out --mult 1 --scale 2      # 只超分
@@ -68,6 +68,10 @@ python -m upscaler.cli video -i a.mp4 -o ~/out --mult 1 --scale 2      # 只超�
 |---|---|---|
 | 超分 | `realesr-animevideov3`（视频，轻量）/ `4x-UltraSharp`（图片） | `realesr-general-x4v3`、`RealESRGAN_x2plus`、`RealESRGAN_x4plus`、`4x_foolhardy_Remacri`、`4xPSNR` |
 | 补帧 | `rife_v4.26` | `rife_v4.25_lite` |
+
+**透明 PNG**：带 alpha 的图会先把 alpha 分离出来、对 RGB 做 alpha 预乘再超分，最后合并回去，
+透明边缘不会渗黑；alpha 本身用 bilinear 放大（比走模型快一倍，遮罩边缘也不会被锐化出振铃）。
+alpha 全不透明的图会自动丢掉 alpha、按 RGB 保存，不额外耗时。
 
 **轻量模型（SRVGGNetCompact，0.6~1.2M 参数）是 Mac 上的关键提速手段**：比 RRDBNet 小 14~27 倍，
 720p→4K 单帧 **175 ms**（RRDBNet x4plus 是 5879 ms），保真度只低约 1 dB，1:1 对比几乎看不出差别。

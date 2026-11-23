@@ -27,12 +27,21 @@ def _noop(*a, **k):
 
 
 # ------------------------------------------------------------------ 图片
-def load_image(path: str) -> torch.Tensor:
-    im = Image.open(path)
-    im = im.convert("RGBA" if "A" in im.getbands() else "RGB")
+def load_image(path: str) -> tuple[torch.Tensor, "torch.Tensor | None"]:
+    """返回 (RGB tensor [1,3,H,W], alpha tensor [1,1,H,W] 或 None)。
+
+    模型只吃 3 通道，所以 alpha 单独拿出来；全不透明（α 全 255）时直接丢掉，
+    不额外花时间。
+    """
     import numpy as np
-    arr = np.asarray(im, dtype="float32") / 255.0
-    return torch.from_numpy(arr).permute(2, 0, 1)[None]          # 1,3/4,H,W
+    im = Image.open(path)
+    alpha = None
+    if "A" in im.getbands():
+        a = im.getchannel("A")
+        if a.getextrema()[0] < 255:                 # 有真正的透明区域
+            alpha = torch.from_numpy(np.asarray(a, dtype="float32") / 255.0)[None, None]
+    rgb = np.asarray(im.convert("RGB"), dtype="float32") / 255.0
+    return torch.from_numpy(rgb).permute(2, 0, 1)[None], alpha
 
 
 def save_image(t: torch.Tensor, path: str):
@@ -82,9 +91,15 @@ def run_images(src: str, out_dir: str, scale: float = 2.0, model: str = "4x-Ultr
             emit("item_start", f"[{i}/{len(files)}] {f.name}", index=i, total=len(files), name=f.name)
             t0 = time.time()
             try:
-                x = load_image(str(f))
-                y = up.upscale(x)
-                y = resize_to(y, post, method)
+                x, alpha = load_image(str(f))
+                if alpha is None:
+                    y = resize_to(up.upscale(x), post, method)
+                else:
+                    # 透明像素的 RGB 通常是纯黑，直接放大会在边缘渗出黑边。
+                    # 先按 alpha 预乘再放大，最后除回去（标准做法）。
+                    y = resize_to(up.upscale(x * alpha), post, method)
+                    a = resize_to(alpha, scale, "bilinear")
+                    y = torch.cat([y / a.clamp_min(1e-4), a], 1).clamp_(0, 1)
                 save_image(y, str(dst))
                 ok += 1
                 emit("item_done",
